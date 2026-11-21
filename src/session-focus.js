@@ -45,7 +45,8 @@ function hasSupportedOrcaPaneTarget(entry, options = {}) {
   if (!paneKey || paneKey.length > 256) return false;
   if (!/^[\w-]+:[\w-]+$/.test(paneKey)) return false;
   const osPlatform = normalizeOsPlatform(options);
-  return osPlatform === "darwin" || osPlatform === "win32";
+  return osPlatform === "darwin" || osPlatform === "win32"
+    || (osPlatform === "linux" && isHyprlandSession(options.env));
 }
 
 // herdr (#1139) only ever ships a pane id from a hook running inside a local
@@ -70,6 +71,10 @@ function isKdeWaylandSession(env = process.env) {
     && String(env.XDG_CURRENT_DESKTOP || "").split(":").some((name) => name.toUpperCase() === "KDE")
     && /^\d+$/.test(env.KDE_SESSION_VERSION || "")
     && Number(env.KDE_SESSION_VERSION) >= 6;
+}
+
+function isHyprlandSession(env = process.env) {
+  return !!env.HYPRLAND_INSTANCE_SIGNATURE;
 }
 
 function canRaiseLinuxTerminalWindow(env = process.env) {
@@ -239,5 +244,6 @@ module.exports = {
   hasLinuxTabTarget,
   isDshDesktopSession,
   isFocusableLocalHudSession,
+  isHyprlandSession,
   isKdeWaylandSession,
 };

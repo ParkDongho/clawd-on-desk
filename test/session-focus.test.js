@@ -255,13 +255,50 @@ describe("session focus helpers", () => {
 
     assert.deepStrictEqual(getSessionFocusTarget(remoteOrca, { osPlatform: "darwin" }), terminalTarget);
     assert.deepStrictEqual(getSessionFocusTarget(remoteOrca, { osPlatform: "win32" }), terminalTarget);
-    assert.deepStrictEqual(getSessionFocusTarget(remoteOrca, { osPlatform: "linux" }), unavailable);
+    assert.deepStrictEqual(getSessionFocusTarget(remoteOrca, { osPlatform: "linux", env: {} }), unavailable);
     assert.deepStrictEqual(getSessionFocusTarget({ ...remoteOrca, orcaPaneKey: "bad" }, { osPlatform: "darwin" }), unavailable);
     assert.deepStrictEqual(getSessionFocusTarget({ ...remoteOrca, platform: "webui" }, { osPlatform: "darwin" }), unavailable);
 
     // The HUD/Dashboard click target is enabled, but local-only consumers such
     // as pet-body focus and Telegram Direct Send must not absorb remote sessions.
     assert.strictEqual(isFocusableLocalHudSession(remoteOrca, { osPlatform: "darwin" }), false);
+  });
+
+  it("allows a valid Orca pane to target the local IDE on Hyprland without a PID", () => {
+    const entry = { id: "orca", orcaPaneKey: "tab:leaf" };
+    const terminalTarget = { canFocus: true, type: "terminal", url: null };
+    const unavailable = { canFocus: false, type: null, url: null };
+    const linux = { osPlatform: "linux", env: { XDG_SESSION_TYPE: "wayland", XDG_CURRENT_DESKTOP: "Hyprland" } };
+    const hyprland = { ...linux, env: { ...linux.env, HYPRLAND_INSTANCE_SIGNATURE: "test-instance" } };
+    const remote = { ...entry, host: "remote-box" };
+
+    assert.deepStrictEqual(getSessionFocusTarget(entry, hyprland), terminalTarget);
+    assert.deepStrictEqual(getSessionFocusTarget({ ...entry, sourcePid: 123 }, hyprland), terminalTarget);
+    assert.deepStrictEqual(getSessionFocusTarget(remote, hyprland), terminalTarget);
+    assert.deepStrictEqual(getSessionFocusTarget({ ...entry, orcaPaneKey: "bad" }, hyprland), unavailable);
+    assert.deepStrictEqual(getSessionFocusTarget({ ...remote, orcaPaneKey: null }, hyprland), unavailable);
+    assert.strictEqual(isFocusableLocalHudSession(remote, hyprland), false);
+
+    assert.deepStrictEqual(getSessionFocusTarget(entry, linux), unavailable);
+    assert.deepStrictEqual(getSessionFocusTarget({ ...entry, sourcePid: 123 }, linux), {
+      ...unavailable, reason: "linux-wayland-window-raise",
+    });
+    assert.deepStrictEqual(getSessionFocusTarget(entry, { osPlatform: "darwin", env: {} }), terminalTarget);
+    assert.deepStrictEqual(getSessionFocusTarget(entry, { osPlatform: "win32", env: {} }), terminalTarget);
+  });
+
+  it("reads the local Hyprland signature when the caller only passes osPlatform", (t) => {
+    const previous = process.env.HYPRLAND_INSTANCE_SIGNATURE;
+    t.after(() => {
+      if (previous === undefined) delete process.env.HYPRLAND_INSTANCE_SIGNATURE;
+      else process.env.HYPRLAND_INSTANCE_SIGNATURE = previous;
+    });
+    process.env.HYPRLAND_INSTANCE_SIGNATURE = "test-instance";
+    const entry = { id: "orca", orcaPaneKey: "tab:leaf" };
+    assert.deepStrictEqual(getSessionFocusTarget(entry, { osPlatform: "linux" }), {
+      canFocus: true, type: "terminal", url: null,
+    });
+    assert.strictEqual(getSessionFocusTarget(entry, { osPlatform: "linux", env: {} }).canFocus, false);
   });
 
   it("opens the DSH desktop window only for local desktop-carrier sessions on supported hosts", () => {

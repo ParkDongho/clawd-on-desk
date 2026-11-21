@@ -51,6 +51,7 @@ function mockOrcaCli(opts = {}) {
     // hand the generic path Orca.app itself.
     psComm = null,
     switchDelayMs = 0,
+    hyprctl = null,
   } = opts;
   const calls = [];
   let switchIdx = 0;
@@ -58,6 +59,8 @@ function mockOrcaCli(opts = {}) {
   const mock = function (cmd, args, options, cb) {
     if (typeof options === "function") { cb = options; options = {}; }
     calls.push({ cmd, args: [...args] });
+
+    if (cmd === "hyprctl" && hyprctl) return hyprctl(args, cb);
 
     if (cmd === "ps" && psComm && args[1] === "pid=,comm=") {
       const pids = String(args[3] || "").split(",").filter(Boolean);
@@ -329,22 +332,13 @@ describe("Orca pane key validator copies", () => {
 });
 
 describe("Orca window raise", () => {
-  // Windows raises inside the generated PowerShell ($orcaProcessNames), so that path
-  // must spawn nothing but the `orca` CLI. Linux has no raise at all: WM_CLASS
-  // "orca" is a substring match that also hits GNOME's screen reader and OrcaSlicer,
-  // so a miss would activate an unrelated window and log it as a success.
-  for (const platform of ["win32", "linux"]) {
-    it(`spawns only the orca CLI on ${platform}`, async () => {
-      await withFocus({ platform }, async (t, cli) => {
-        t.scheduleOrcaPaneFocus(PANE_KEY, CWD);
-        await settle(t);
-        const strays = cli.calls.filter((c) => !/(^|[\\/])orca(\.exe)?$/i.test(c.cmd));
-        assert.deepStrictEqual(strays.map((c) => c.cmd), [],
-          `no window-raise helper may be spawned from Node: ${JSON.stringify(cli.calls)}`);
-        assert.ok(cli.switchCalls().length > 0, "the pane switch still runs");
-      });
+  it("spawns only the Orca CLI on Windows, where PowerShell raises the window", async () => {
+    await withFocus({ platform: "win32" }, async (t, cli) => {
+      await t.scheduleOrcaPaneFocus(PANE_KEY, CWD);
+      assert.deepStrictEqual(cli.calls.map((c) => c.cmd), ["orca", "orca"]);
+      assert.strictEqual(cli.switchCalls().length, 1);
     });
-  }
+  });
 
   it("activates the Orca bundle by absolute path on macOS", async () => {
     await withFocus({ platform: "darwin", macBundles: ["/Applications/Orca.app"] }, async (t, cli) => {
@@ -889,22 +883,100 @@ describe("Orca CLI that never answers", () => {
   }
 });
 
-describe("Orca focus wiring", () => {
-  // The Windows dispatch itself is driven through the public focusTerminalWindow in
-  // test/focus-windows.test.js, which mocks spawn so the real helper never starts.
-  it("is dispatched from the Windows and macOS branches, never Linux", () => {
-    const fs = require("fs");
-    const src = fs.readFileSync(path.join(__dirname, "..", "src", "focus.js"), "utf8");
-    const calls = src.match(/scheduleOrcaPaneFocus\(request\./g) || [];
-    assert.strictEqual(calls.length, 2, "expected one dispatch per supported platform");
-    // Linux still has no raise it can trust — WM_CLASS "orca" also matches GNOME's
-    // screen reader — so a pane switch there would move a tab in a window that never
-    // comes forward, which is worse than doing nothing.
-    const linuxBranch = src.slice(src.indexOf("branch=linux-command-submitted") - 800);
-    assert.ok(!/scheduleOrcaPaneFocus/.test(linuxBranch.slice(0, 800)),
-      "the Linux branch must not dispatch the pane switch");
+describe("Orca focus on Linux", () => {
+  function setSessionEnv(t, env) {
+    for (const [name, value] of Object.entries(env)) {
+      const previous = process.env[name];
+      t.after(() => {
+        if (previous === undefined) delete process.env[name];
+        else process.env[name] = previous;
+      });
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+
+  it("tries only Orca IDE CLI candidates in Linux lookup order", async (t) => {
+    setSessionEnv(t, { HYPRLAND_INSTANCE_SIGNATURE: undefined });
+    const candidates = [
+      "orca-ide",
+      path.posix.join(os.homedir(), ".local", "bin", "orca-ide"),
+      "/opt/stably-orca/resources/bin/orca-ide",
+    ];
+    await withFocus({ platform: "linux", missingBinaries: candidates }, async (helpers, cli) => {
+      assert.deepStrictEqual(helpers.orcaCliCandidates(), candidates);
+      const outcome = await helpers.scheduleOrcaPaneFocus(PANE_KEY, CWD);
+      assert.strictEqual(outcome.reason, "orca-cli-not-found");
+      assert.deepStrictEqual(cli.calls.map((call) => call.cmd), candidates);
+    });
   });
 
+  for (const sourcePid of [3333, undefined]) {
+    it(`switches before raising on Hyprland ${sourcePid ? "with" : "without"} a source PID`, async (t) => {
+      setSessionEnv(t, { HYPRLAND_INSTANCE_SIGNATURE: "test-instance" });
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      const realpath = t.mock.method(require("fs").promises, "realpath", async () => "/opt/stably-orca/orca-ide");
+      const httpRequest = t.mock.method(require("http"), "request", () => assert.fail("unexpected editor tab focus"));
+      const clients = [{ address: "0xabc", class: "orca", pid: 42, initialTitle: "Orca", focusHistoryID: 1 }];
+      const hyprctl = (args, cb) => cb(null, args[0] === "clients" ? JSON.stringify(clients) : "ok\n");
+
+      await withFocus({ platform: "linux", switchDelayMs: 10, hyprctl }, async (helpers, cli, logs, focus) => {
+        helpers.__setTmuxBin("/mock/tmux");
+        focus.focusTerminalWindow({
+          sourcePid, orcaPaneKey: PANE_KEY, cwd: "/repo", editor: "cursor",
+          pidChain: [1111, 3333], tmuxSocket: "/tmp/tmux.sock", herdrPaneId: "w5:p4",
+          ORCA_CLI_COMMAND: "/untrusted/orca", env: { ORCA_CLI_COMMAND: "/untrusted/orca" },
+        });
+        t.mock.timers.tick(helpers.ORCA_PANE_FOCUS_DELAY_MS);
+        assert.deepStrictEqual(cli.calls, [
+          { cmd: "orca-ide", args: ["terminal", "list", "--json"] },
+          { cmd: "orca-ide", args: ["terminal", "switch", "--terminal", LIVE_HANDLE, "--json"] },
+        ]);
+
+        t.mock.timers.tick(1000);
+        await new Promise(setImmediate);
+        assert.deepStrictEqual(cli.calls.slice(2), [
+          { cmd: "hyprctl", args: ["clients", "-j"] },
+          { cmd: "hyprctl", args: ["dispatch", 'hl.dsp.focus({ window = "address:0xabc" })'] },
+        ]);
+        assert.deepStrictEqual(realpath.mock.calls.map((call) => call.arguments), [["/proc/42/exe"]]);
+        assert.strictEqual(httpRequest.mock.callCount(), 0);
+        assert.ok(logs.includes("focus result branch=orca reason=orca-pane-switched raise=ok"));
+      });
+    });
+  }
+
+  it("does not raise or fall back to the legacy path when the pane switch fails", async (t) => {
+    setSessionEnv(t, { HYPRLAND_INSTANCE_SIGNATURE: "test-instance" });
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const switchResults = [{ ok: false, code: "terminal_not_writable" }];
+    await withFocus({ platform: "linux", switchResults }, async (helpers, cli, logs, focus) => {
+      focus.focusTerminalWindow({ sourcePid: 3333, orcaPaneKey: PANE_KEY });
+      t.mock.timers.tick(helpers.ORCA_PANE_FOCUS_DELAY_MS);
+      await new Promise(setImmediate);
+      assert.deepStrictEqual(cli.calls.map((call) => call.cmd), ["orca-ide", "orca-ide"]);
+      assert.ok(logs.includes("focus result branch=orca reason=orca-switch-failed"));
+    });
+  });
+
+  it("keeps Linux's legacy focus outside Hyprland and still requires a PID there", async (t) => {
+    setSessionEnv(t, { HYPRLAND_INSTANCE_SIGNATURE: undefined, XDG_SESSION_TYPE: "x11" });
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    await withFocus({ platform: "linux" }, async (helpers, cli, logs, focus) => {
+      const paneOnly = focus.focusTerminalWindow({ orcaPaneKey: PANE_KEY });
+      assert.strictEqual(paneOnly.reason, "no-source-pid");
+      assert.deepStrictEqual(cli.calls, []);
+
+      const legacy = focus.focusTerminalWindow({ sourcePid: 3333, orcaPaneKey: PANE_KEY, herdrPaneId: "w5:p4" });
+      t.mock.timers.tick(helpers.ORCA_PANE_FOCUS_DELAY_MS);
+      assert.strictEqual(legacy.reason, "linux-command-submitted");
+      assert.deepStrictEqual(cli.calls.map((call) => call.cmd), ["wmctrl", "xdotool", "herdr"]);
+      assert.ok(logs.includes("focus result branch=linux-x11 reason=xdotool-activated"));
+    });
+  });
+});
+
+describe("Orca focus wiring", () => {
   it("reaches the pane switch and the raise through the public macOS focus call", async () => {
     // The source guard above cannot see whether the dispatch is actually reachable:
     // the mac branch sits behind a throttle and an in-flight queue.
