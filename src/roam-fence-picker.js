@@ -2,6 +2,7 @@
 
 const defaultPath = require("path");
 const { pathToFileURL } = require("url");
+const { createOverlayWindow } = require("./hyprland-placement");
 
 const READY_CHANNEL = "roam-fence-picker:ready";
 const APPLIED_CHANNEL = "roam-fence-picker:state-applied";
@@ -315,7 +316,7 @@ function createRoamFencePicker(options = {}) {
     };
     if (options.iconPath) windowOptions.icon = options.iconPath;
     let win;
-    try { win = new BrowserWindow(windowOptions); }
+    try { win = createOverlayWindow(BrowserWindow, "roam-fence", windowOptions); }
     catch (err) {
       return Promise.resolve({ status: "error", message: (err && err.message) || String(err) });
     }

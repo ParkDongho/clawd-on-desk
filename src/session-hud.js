@@ -2,6 +2,7 @@
 
 const { BrowserWindow, screen } = require("electron");
 const path = require("path");
+const { createOverlayWindow } = require("./hyprland-placement");
 const { keepOutOfTaskbar } = require("./taskbar");
 const { hasTaggedFallbackRow } = require("./session-hud-tagged-fallback");
 const { clampTextScale, scaleHeight, applyZoomToWindow } = require("./text-scale");
@@ -705,7 +706,7 @@ module.exports = function initSessionHud(ctx) {
     ringDidFinishLoad = false;
     const scale = getTextScale();
     const provisional = ringGeom.constants;
-    ringWindow = new BrowserWindow({
+    ringWindow = createOverlayWindow(BrowserWindow, "quota-ring", {
       parent: ctx.win,
       width: scaleHeight(provisional.COIN_SIZE + provisional.READOUT_W + 40, scale),
       height: scaleHeight(provisional.COIN_SIZE * 2 + 40, scale),
@@ -829,7 +830,7 @@ module.exports = function initSessionHud(ctx) {
     // precise computeSessionHudBounds() result before the window is shown.
     const scale = getTextScale();
     const widthScale = getHudWidthScale(scale, hasTaggedFallback);
-    hudWindow = new BrowserWindow({
+    hudWindow = createOverlayWindow(BrowserWindow, "hud", {
       parent: ctx.win,
       width: computeHudOuterWidth(hudWidth, scale, widthScale),
       height: scaleHeight(HUD_HEIGHT + HUD_WINDOW_SHELL.top + HUD_WINDOW_SHELL.bottom, scale),

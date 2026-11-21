@@ -93,6 +93,27 @@ function convertHyprlandPoint(point, matching) {
   return null;
 }
 
+function matchWaylandDisplays(monitors, displays) {
+  if (!Array.isArray(monitors) || !Array.isArray(displays) ||
+      !displays.length || monitors.length !== displays.length) return false;
+  const byName = new Map(monitors.map((monitor) => [monitor?.name, monitor]));
+  return displays.every((display) => {
+    const { label, bounds } = display || {};
+    const name = typeof label === "string" && /\(([^()]+)\)\s*$/.exec(label)?.[1];
+    const monitor = byName.get(name);
+    if (!name || !isPoint(monitor) || !isPoint(bounds) ||
+        !Number.isInteger(monitor.width) || monitor.width <= 0 ||
+        !Number.isInteger(monitor.height) || monitor.height <= 0 ||
+        !Number.isFinite(monitor.scale) || monitor.scale <= 0 ||
+        !Number.isInteger(monitor.transform) || monitor.transform < 0 || monitor.transform > 7) return false;
+    byName.delete(name);
+    const rotated = monitor.transform % 2;
+    const width = Math.round((rotated ? monitor.height : monitor.width) / monitor.scale);
+    const height = Math.round((rotated ? monitor.width : monitor.height) / monitor.scale);
+    return bounds.x === monitor.x && bounds.y === monitor.y && bounds.width === width && bounds.height === height;
+  });
+}
+
 function readHyprlandJson(socket, command) {
   return new Promise((resolve, reject) => {
     let reply = "";
@@ -141,8 +162,10 @@ function installHyprlandCursor(screen, options = {}) {
     return false;
   }
 
-  if (platform !== "linux" || app.commandLine.getSwitchValue("ozone-platform") !== "x11") {
-    return disabled("requires Linux with the X11 ozone backend");
+  const ozone = platform === "linux" && app.commandLine.getSwitchValue("ozone-platform");
+  const wayland = ozone === "wayland";
+  if (ozone !== "x11" && !wayland) {
+    return disabled("requires Linux with the X11 or Wayland ozone backend");
   }
   if (!signature || !runtimeDir) return disabled("missing Hyprland environment");
   const socketPath = path.join(runtimeDir, "hypr", signature, ".socket.sock");
@@ -158,10 +181,18 @@ function installHyprlandCursor(screen, options = {}) {
 
   function getCursorScreenPoint() {
     if (sample && matching && clock.now() - sample.at <= MAX_CURSOR_AGE_MS) {
-      const point = convertHyprlandPoint(sample, matching);
+      const point = wayland ? { x: sample.x, y: sample.y } : convertHyprlandPoint(sample, matching);
       if (point) return point;
     }
     return previous.call(screen);
+  }
+
+  function resetMatching() {
+    matching = null;
+    if (wayland) {
+      sample = null;
+      if (screen.getCursorScreenPoint === getCursorScreenPoint) screen.getCursorScreenPoint = previous;
+    }
   }
 
   async function poll(command) {
@@ -174,10 +205,18 @@ function installHyprlandCursor(screen, options = {}) {
       const value = await readHyprlandJson(activeSocket, command);
       if (stopped || revision !== displayRevision) return;
       if (refresh) {
-        const result = matchMonitorsToDisplays(value, screen.getAllDisplays());
-        matching = result.pairs ? result : null;
-        if (matching) report("enabled", "monitor layout matched", matching.mode);
-        else report("disabled", result.reason);
+        const displays = screen.getAllDisplays();
+        const result = wayland
+          ? (matchWaylandDisplays(value, displays) ? { mode: "identity" } : { reason: "Wayland monitor/display geometry mismatch" })
+          : matchMonitorsToDisplays(value, displays);
+        if (wayland ? result.mode : result.pairs) {
+          matching = result;
+          if (wayland) screen.getCursorScreenPoint = getCursorScreenPoint;
+          report("enabled", "monitor layout matched", matching.mode);
+        } else {
+          resetMatching();
+          report("disabled", result.reason);
+        }
       } else {
         if (!isPoint(value)) throw new Error("invalid cursor position");
         sample = { x: value.x, y: value.y, at: clock.now() };
@@ -185,7 +224,7 @@ function installHyprlandCursor(screen, options = {}) {
     } catch (err) {
       if (stopped || revision !== displayRevision) return;
       if (refresh) {
-        matching = null;
+        resetMatching();
         report("disabled", err.message);
       } else {
         sample = null;
@@ -203,14 +242,16 @@ function installHyprlandCursor(screen, options = {}) {
   }
   function onDisplayChange() {
     displayRevision += 1;
-    matching = null;
+    resetMatching();
     sample = null;
     refreshMonitors();
   }
 
-  screen.getCursorScreenPoint = getCursorScreenPoint;
+  if (!wayland) screen.getCursorScreenPoint = getCursorScreenPoint;
   for (const event of DISPLAY_EVENTS) screen.on(event, onDisplayChange);
-  const cursorTimer = clock.setInterval(() => void poll("j/cursorpos"), CURSOR_INTERVAL_MS);
+  const cursorTimer = clock.setInterval(() => {
+    if (!wayland || matching) void poll("j/cursorpos");
+  }, CURSOR_INTERVAL_MS);
   const monitorTimer = clock.setInterval(refreshMonitors, MONITOR_INTERVAL_MS);
   cursorTimer.unref();
   monitorTimer.unref();

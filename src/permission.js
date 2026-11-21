@@ -2,6 +2,7 @@
 // Extracted from main.js L349-357, L1594-1746
 
 const { BrowserWindow, globalShortcut } = require("electron");
+const { createOverlayWindow } = require("./hyprland-placement");
 const { getDefaultShortcuts } = require("./shortcut-actions");
 const { keepOutOfTaskbar } = require("./taskbar");
 const { clampTextScale, scaleWidth, scaleHeight, applyZoomToWindow } = require("./text-scale");
@@ -2025,7 +2026,7 @@ function createQueueWindow(geometry) {
   const initialSize = getQueueCompactSize(geometry);
   let queueWindow;
   try {
-    queueWindow = new BrowserWindow({
+    queueWindow = createOverlayWindow(BrowserWindow, "permission-queue", {
       width: initialSize.width,
       height: initialSize.height,
       x: 0,
@@ -2902,7 +2903,7 @@ function showPermissionBubble(permEntry) {
   const needsTextInput = interactionCapabilities.answerQuestions === true
     || interactionCapabilities.planFeedback === true;
 
-  const bub = new BrowserWindow({
+  const bub = createOverlayWindow(BrowserWindow, "permission", {
     width: pos.width,
     height: pos.height,
     x: pos.x,

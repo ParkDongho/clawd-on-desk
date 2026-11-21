@@ -246,12 +246,12 @@ test("falls back on a monitor count mismatch and recovers after a display refres
   assert.deepEqual(h.screen.getCursorScreenPoint(), CONVERTED_POINT);
 });
 
-test("installs only on Linux X11 with both Hyprland variables and an existing socket", (t) => {
+test("requires Linux, an explicit resolved ozone backend, and an existing Hyprland socket", (t) => {
   const h = harness(t);
   const { options, screen } = h;
   const cases = [
     { platform: "darwin" },
-    { app: { commandLine: { getSwitchValue: () => "wayland" } } },
+    { app: { commandLine: { getSwitchValue: () => "auto" } } },
     { env: { XDG_RUNTIME_DIR: "/run/user/test" } },
     { env: { HYPRLAND_INSTANCE_SIGNATURE: "test-instance" } },
     { fs: { existsSync: () => false } },
@@ -262,4 +262,66 @@ test("installs only on Linux X11 with both Hyprland variables and an existing so
   }
   assert.equal(h.timers.size, 0);
   assert.equal(h.sockets.length, 0);
+});
+
+const WAYLAND_DISPLAYS = [
+  { label: "Built-in display (eDP-1)", bounds: { x: 5757, y: 1546, width: 1600, height: 1000 } },
+  { label: "Sceptre (DP-1)", bounds: { x: 3837, y: 1466, width: 1920, height: 1080 } },
+  { label: "External (DP-2)", bounds: { x: 2837, y: 1466, width: 1000, height: 1600 } },
+];
+
+function waylandHarness(t) {
+  const h = harness(t);
+  h.options.app.commandLine.getSwitchValue = () => "wayland";
+  h.screen.getAllDisplays = () => [...WAYLAND_DISPLAYS].reverse();
+  h.useElectronFallback();
+  return h;
+}
+
+test("Wayland installs identity conversion only after matching all displays by connector and rotated logical bounds", async (t) => {
+  const h = waylandHarness(t);
+  assert.equal(installHyprlandCursor(h.screen, h.options), true);
+  assert.equal(h.screen.getCursorScreenPoint, h.previous);
+  h.timers.get(33).callback();
+  assert.equal(h.sockets.length, 1);
+  await h.reply("j/monitors", JSON.stringify(MONITORS));
+  await h.sample();
+  assert.deepEqual(h.screen.getCursorScreenPoint(), HYPR_POINT);
+  await h.sample({ x: 3637, y: 2866 });
+  assert.deepEqual(h.screen.getCursorScreenPoint(), { x: 3637, y: 2866 });
+  assert.match(h.log.mock.calls[0].arguments[0], /matching=identity/);
+  h.advance(151);
+  assert.deepEqual(h.screen.getCursorScreenPoint(), ELECTRON_POINT);
+});
+
+test("Wayland disables cursor sampling on a display mismatch and validates again after a display change", async (t) => {
+  const h = waylandHarness(t);
+  await h.start();
+  await h.sample();
+  assert.deepEqual(h.screen.getCursorScreenPoint(), HYPR_POINT);
+
+  for (const displays of [
+    WAYLAND_DISPLAYS.slice(1),
+    [{ ...WAYLAND_DISPLAYS[0], label: "eDP-1" }, ...WAYLAND_DISPLAYS.slice(1)],
+    [{ ...WAYLAND_DISPLAYS[0], label: "Other (DP-1)" }, ...WAYLAND_DISPLAYS.slice(1)],
+    [{ ...WAYLAND_DISPLAYS[0], bounds: { ...WAYLAND_DISPLAYS[0].bounds, x: 5756 } }, ...WAYLAND_DISPLAYS.slice(1)],
+    [...WAYLAND_DISPLAYS.slice(0, 2), { ...WAYLAND_DISPLAYS[2], bounds: { x: 2837, y: 1466, width: 1600, height: 1000 } }],
+  ]) {
+    h.screen.getAllDisplays = () => displays;
+    h.screen.emit("display-metrics-changed");
+    await h.reply("j/monitors", JSON.stringify(MONITORS));
+    const socketCount = h.sockets.length;
+    h.timers.get(33).callback();
+    assert.equal(h.sockets.length, socketCount);
+    assert.equal(h.screen.getCursorScreenPoint, h.previous);
+    assert.deepEqual(h.screen.getCursorScreenPoint(), ELECTRON_POINT);
+  }
+  assert.equal(h.warn.mock.callCount(), 1);
+  assert.match(h.warn.mock.calls[0].arguments[0], /Wayland monitor\/display geometry mismatch/);
+
+  h.screen.getAllDisplays = () => WAYLAND_DISPLAYS;
+  h.screen.emit("display-added");
+  await h.reply("j/monitors", JSON.stringify(MONITORS));
+  await h.sample();
+  assert.deepEqual(h.screen.getCursorScreenPoint(), HYPR_POINT);
 });

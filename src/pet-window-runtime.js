@@ -1,6 +1,7 @@
 "use strict";
 
 const createPetGeometryMain = require("./pet-geometry-main");
+const { createOverlayWindow, isHyprlandPlacementActive } = require("./hyprland-placement");
 const {
   computeLooseClamp,
   getDisplayInsets,
@@ -216,7 +217,7 @@ function createPetWindowRuntime(options = {}) {
   // restart being architecturally required, matching how isLinux/isWin etc.
   // are otherwise treated as fixed per-process facts but env vars are not.
   const isEdgeVirtualizationDisabled = options.isEdgeVirtualizationDisabled
-    || (() => process.env.CLAWD_DISABLE_EDGE_VIRTUALIZATION === "1");
+    || (() => isHyprlandPlacementActive() || process.env.CLAWD_DISABLE_EDGE_VIRTUALIZATION === "1");
   const flushRuntimeStateToPrefs = options.flushRuntimeStateToPrefs || noop;
   const handleMiniDisplayChange = options.handleMiniDisplayChange || noop;
   // Issue #690 plan §4.5 point 4.5-4: handleDisplayMetricsChanged() must hand
@@ -2339,7 +2340,7 @@ function createPetWindowRuntime(options = {}) {
     if (optionsArg.rendererConfigChannel) {
       optionsArg.rendererConfigChannel.setPetConfig(optionsArg.themeConfig);
     }
-    const renderWin = new BrowserWindow({
+    const renderWin = createOverlayWindow(BrowserWindow, "render", {
       width: size.width,
       height: size.height,
       x: initialWindowBounds.x,
@@ -2468,7 +2469,7 @@ function createPetWindowRuntime(options = {}) {
     if (optionsArg.rendererConfigChannel) {
       optionsArg.rendererConfigChannel.setHitConfig(optionsArg.hitThemeConfig);
     }
-    const hitWin = new BrowserWindow({
+    const hitWin = createOverlayWindow(BrowserWindow, "hit", {
       ...(isWin ? { show: false } : {}),
       width: initialHitWindowBounds.width,
       height: initialHitWindowBounds.height,

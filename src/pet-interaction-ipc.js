@@ -117,6 +117,7 @@ function registerPetInteractionIpc(options = {}) {
 
   on("drag-lock", (_event, locked) => {
     setDragLocked(!!locked);
+    require("./hyprland-placement").setHyprlandPointerHeld(!!locked);
     if (locked) {
       setMouseOverPet(true);
       cancelRoam();

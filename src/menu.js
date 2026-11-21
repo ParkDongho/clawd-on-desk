@@ -2,6 +2,9 @@
 
 const { app, BrowserWindow, screen, Menu, Tray, nativeImage } = require("electron");
 const path = require("path");
+const {
+  createOverlayWindow, isHyprlandPlacementActive, setHyprlandMenuOpen, logHyprlandMenu,
+} = require("./hyprland-placement");
 const { keepOutOfTaskbar } = require("./taskbar");
 const { loadTrayNormalIcon } = require("./tray-flash-icon");
 const { createMacDockVisibilityCoordinator } = require("./mac-dock-visibility");
@@ -407,7 +410,7 @@ module.exports = function initMenu(ctx) {
     if (ctx.contextMenuOwner && !ctx.contextMenuOwner.isDestroyed()) return ctx.contextMenuOwner;
     if (!ctx.win || ctx.win.isDestroyed()) return null;
 
-    ctx.contextMenuOwner = new BrowserWindow({
+    ctx.contextMenuOwner = createOverlayWindow(BrowserWindow, "menu-owner", {
       parent: ctx.win,
       x: 0,
       y: 0,
@@ -499,8 +502,49 @@ module.exports = function initMenu(ctx) {
     }, MENU_OWNER_HIDE_DELAY_MS);
   }
 
+  // Native Hyprland (no XWayland): the 1x1 owner below would map at the
+  // compositor's default spot before its async move lands, and focusing it
+  // warps the cursor there. Pop the menu up on the hit window instead -- it
+  // received the right-click and holds focus -- and hold the placement's focus
+  // restore until the menu closes. Kept separate so upstream's owner path
+  // stays untouched.
+  function popupNativeHyprlandMenu(menu) {
+    const hit = isHyprlandPlacementActive() ? ctx.hitWin : null;
+    if (!hit || hit.isDestroyed() || !hit.isVisible()) return false;
+    setHyprlandMenuOpen(true);
+    ctx.menuOpen = true;
+    let closed = false;
+    const finish = () => {
+      if (closed) return;
+      closed = true;
+      hit.removeListener("closed", finish);
+      try {
+        logHyprlandMenu("close", hit);
+        ctx.menuOpen = false;
+        // Same #1260 backstop as the owner path's close callback. The
+        // render-window re-show there is skipped: showInactive() is
+        // unsupported on Wayland and no owner was shown over the pet.
+        if (ctx.dragLocked && typeof ctx.releaseStrandedDragLock === "function") {
+          ctx.releaseStrandedDragLock();
+        }
+      } finally {
+        setHyprlandMenuOpen(false);
+      }
+    };
+    hit.once("closed", finish);
+    try {
+      logHyprlandMenu("open", hit);
+      menu.popup({ window: hit, callback: finish });
+    } catch (error) {
+      finish();
+      throw error;
+    }
+    return true;
+  }
+
   function popupMenuAt(menu) {
     if (ctx.menuOpen) return;
+    if (popupNativeHyprlandMenu(menu)) return;
     cancelOwnerHide();
     const owner = ensureContextMenuOwner();
     if (!owner) return;

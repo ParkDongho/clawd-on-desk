@@ -1,5 +1,6 @@
 const { BrowserWindow } = require("electron");
 const path = require("path");
+const { createOverlayWindow } = require("./hyprland-placement");
 const { keepOutOfTaskbar } = require("./taskbar");
 const { clampTextScale, scaleWidth, scaleHeight, applyZoomToWindow } = require("./text-scale");
 
@@ -341,7 +342,7 @@ module.exports = function initUpdateBubble(ctx) {
     const petBounds = ctx.getPetWindowBounds();
     const workArea = getTargetWorkArea(petBounds);
     const scale = getTextScale(workArea);
-    bubble = new BrowserWindow({
+    bubble = createOverlayWindow(BrowserWindow, "update-bubble", {
       width: scaleWidth(WIDTH, scale),
       height: scaleHeight(estimateHeight(activePayload), scale),
       show: false,

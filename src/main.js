@@ -4813,7 +4813,7 @@ function showResumeInput(t) {
     // data: URL — outside the file:// zoom map, so the scale is baked into the
     // window size and an inline body zoom instead.
     const resumeScale = getTextScaleForPetWindows();
-    const inputWin = new BrowserWindow({
+    const inputWin = require("./hyprland-placement").createOverlayWindow(BrowserWindow, "resume-input", {
       width: scaleWidth(420, resumeScale),
       height: scaleHeight(180, resumeScale),
       resizable: false,
@@ -4871,6 +4871,7 @@ function showResumeInput(t) {
 
 const _menuCtx = {
   get win() { return win; },
+  get hitWin() { return hitWin; },
   get petAlwaysOnTop() { return getPetAlwaysOnTopEffective(); },
   get sessions() { return sessions; },
   cancelRoam: () => _roam.cancelRoam(),
@@ -6403,6 +6404,7 @@ if (!gotTheLock) {
       onError: (err) => console.warn("Clawd: linux-x11-cursor failed:", err && err.message),
     });
     require("./hyprland-cursor").installHyprlandCursor(screen, { app });
+    await require("./hyprland-placement").installHyprlandPlacement({ app, screen, Notification });
 
     // Older macOS and development builds retain the padded runtime icon from
     // #416. Packaged Tahoe+ leaves the Dock untouched so macOS can apply the
