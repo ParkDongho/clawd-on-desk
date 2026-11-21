@@ -213,6 +213,9 @@ async function installHyprlandPlacement({
   let monitorsDue = false;
   let urgentOwnershipCheck = false;
   let monitors = [];
+  // Workspace of every Hyprland client from the last j/clients snapshot, so a
+  // focus restore never pulls the user back to a workspace they just left.
+  const clientWorkspaces = new Map();
   let activeAddress = null;
   let lastNonOverlayAddress = null;
   // Hyprland sends activewindow>>CLASS,TITLE right before activewindowv2>>ADDR.
@@ -363,6 +366,13 @@ async function installHyprlandPlacement({
   function dueFocusRestore() {
     const restore = focusRestore;
     if (menuOpen || pointerHeld || !restore || restore.timer || restore.target !== lastNonOverlayAddress) return null;
+    // Focusing a window on a hidden workspace makes Hyprland switch to it, which
+    // undid the user's own workspace switch (measured live).
+    const targetWorkspace = clientWorkspaces.get(restore.target);
+    if (Number.isSafeInteger(targetWorkspace) && monitors.length &&
+        !monitors.some((monitor) => monitor.workspaceId === targetWorkspace)) {
+      return null;
+    }
     if (restore.entry.role === "menu-owner") {
       return restore.menuDismissed && (activeAddress === restore.source || activeAddress === null) ? restore : null;
     }
@@ -483,7 +493,11 @@ async function installHyprlandPlacement({
     if (stopped) return;
 
     const byTitle = new Map();
+    clientWorkspaces.clear();
     for (const client of clients) {
+      if (typeof client?.address === "string" && Number.isSafeInteger(client.workspace?.id)) {
+        clientWorkspaces.set(client.address, client.workspace.id);
+      }
       if (client?.class === WINDOW_CLASS && client.pid === process.pid && client.xwayland === false &&
           typeof client.address === "string" && ADDRESS.test(client.address)) {
         byTitle.set(client.title, client);
@@ -601,6 +615,9 @@ async function installHyprlandPlacement({
     const event = line.split(">>", 1)[0];
     if (debug && DEBUG_EVENTS.has(event)) debug(`event ${line}`);
     if (MONITOR_EVENTS.has(event)) {
+      // A workspace switch moves focus onto the pinned pet by itself; that is
+      // not a click to undo, and restoring would switch the workspace back.
+      if (event === "workspacev2") cancelFocusRestore("workspace changed");
       refreshMonitors();
       return;
     }

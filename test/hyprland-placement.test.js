@@ -791,6 +791,52 @@ test("a clawd-on-desk window is never remembered as the restore target, even bef
   assert.deepEqual(h.restores(), [restoreCommand("cafe")]);
 });
 
+test("a workspace switch cancels a pending focus restore instead of switching back", async (t) => {
+  const h = harness(t);
+  await h.start();
+  mapOverlay(h, "hit", "abc", { focusable: false });
+  // Switching workspace focuses the pinned pet by itself, then reports the switch.
+  h.event("activewindow>>orca,Orca\nactivewindowv2>>cafe\n");
+  h.event("activewindow>>clawd-on-desk,clawd·hit·1·1\nactivewindowv2>>abc\nworkspacev2>>4,4\n");
+  h.advance(150);
+  await tick();
+  assert.deepEqual(h.restores(), []);
+});
+
+test("never restores focus to a window on a workspace that is not visible", async (t) => {
+  const h = harness(t);
+  h.monitors = [monitor(1, 3837, 4)];
+  await h.start();
+  const win = mapOverlay(h, "hit", "abc", { focusable: false });
+  h.clients = [client(win, "0xabc", [10, 20], { workspace: { id: 4 } }),
+    { class: "orca", title: "Orca", pid: 1, xwayland: false, address: "0xcafe", at: [0, 0], workspace: { id: 2 } }];
+  h.event("activewindow>>orca,Orca\nactivewindowv2>>cafe\n");
+  h.advance(1000);
+  await tick();
+  await tick();
+  h.event("activewindow>>clawd-on-desk,clawd·hit·1·1\nactivewindowv2>>abc\n");
+  h.advance(150);
+  await tick();
+  assert.deepEqual(h.restores(), []);
+});
+
+test("still restores focus to a window on a visible workspace (control)", async (t) => {
+  const h = harness(t);
+  h.monitors = [monitor(1, 3837, 4)];
+  await h.start();
+  const win = mapOverlay(h, "hit", "abc", { focusable: false });
+  h.clients = [client(win, "0xabc", [10, 20], { workspace: { id: 4 } }),
+    { class: "orca", title: "Orca", pid: 1, xwayland: false, address: "0xcafe", at: [0, 0], workspace: { id: 4 } }];
+  h.event("activewindow>>orca,Orca\nactivewindowv2>>cafe\n");
+  h.advance(1000);
+  await tick();
+  await tick();
+  h.event("activewindow>>clawd-on-desk,clawd·hit·1·1\nactivewindowv2>>abc\n");
+  h.advance(150);
+  await tick();
+  assert.deepEqual(h.restores(), [restoreCommand("cafe")]);
+});
+
 test("closing a hit-window menu cannot restore over a newer activation", async (t) => {
   const h = harness(t);
   await h.start();
