@@ -8,7 +8,8 @@ const crypto = require("crypto");
 const path = require("path");
 const { execFile, spawn } = require("child_process");
 const { quotePowerShellSingleArg } = require("../hooks/json-utils");
-const { isKdeWaylandSession } = require("./session-focus");
+const { isHyprlandSession, isKdeWaylandSession } = require("./session-focus");
+const { raiseOrcaHyprlandWindow } = require("./hyprland-window");
 
 const isMac = process.platform === "darwin";
 const isWin = process.platform === "win32";
@@ -1012,11 +1013,8 @@ function scheduleTerminalTabFocus(editor, pidChain) {
 // ── Orca pane focus ──────────────────────────────────────────────────────────
 // Orca is not a VS Code fork, so the extension route above cannot serve it, and
 // its terminals live in a detached daemon so the process walk cannot either.
-// What it does ship is a first-class CLI: `orca terminal switch` brings a
-// specific tab to the front. That only moves the tab *inside* Orca, so a focus
-// only lands if a window raise runs too — on Windows the $orcaHosted branch in
-// makeFocusCmd, on macOS raiseOrcaMacWindow below. Linux has no raise it can
-// trust, so it does not dispatch this at all.
+// Orca's CLI moves the tab inside the IDE. Windows raises the window in the
+// generated script. macOS and Hyprland raise it after the switch succeeds.
 // Warm round-trips measure 330-420ms, but the first call after Orca has been idle
 // has been observed to blow past 2.5s — and a killed call is indistinguishable
 // from a missing pane unless it is reported separately, which is what
@@ -1024,8 +1022,7 @@ function scheduleTerminalTabFocus(editor, pidChain) {
 // waits before giving up on the pane and falling back to the clipboard, so it is
 // generous on purpose: a slow answer is recoverable, a wrong paste is not.
 const ORCA_CLI_TIMEOUT_MS = 6000;
-// Keeps the CLI round-trip off the click's synchronous path. The window raise has
-// already been dispatched by then — it happens inside the generated script.
+// Keeps the CLI round-trip off the click's synchronous path.
 const ORCA_PANE_FOCUS_DELAY_MS = 150;
 // paneKey → live handle. Purely a fast path: handles are reissued per Orca
 // runtime session, and a switch against an old one fails with
@@ -1033,6 +1030,15 @@ const ORCA_PANE_FOCUS_DELAY_MS = 150;
 const orcaHandleCache = new Map();
 
 function orcaCliCandidates() {
+  if (isLinux) {
+    // Linux's bare `orca` can be the GNOME screen reader. Resolve the IDE CLI
+    // from Clawd's own environment and install paths.
+    const candidates = ["orca-ide"];
+    const home = os.homedir();
+    if (home) candidates.push(path.posix.join(home, ".local", "bin", "orca-ide"));
+    candidates.push("/opt/stably-orca/resources/bin/orca-ide");
+    return candidates;
+  }
   // A normal install puts `orca` on PATH; the explicit paths cover a GUI-launched
   // Electron process that never saw a login shell. On Windows that means one started
   // before the installer's PATH entry existed; on macOS, LaunchServices hands the app
@@ -1191,14 +1197,8 @@ function resolveOrcaHandle(orcaPaneKey, cwd, callback) {
   });
 }
 
-// Dispatched from executeWindowsFocusRequest and executeMacFocusRequest, never the
-// Linux branch. The pane switch alone never brings Orca's window forward, so it is
-// only half a focus without a raise — and the raise cannot reuse the platform
-// helpers, which resolve a window from the agent's pid chain that Orca's detached
-// daemon is absent from. Windows raises by name inside the generated script
-// ($orcaProcessNames); macOS activates the bundle by absolute path below. Linux is
-// left out because its only handle is WM_CLASS "orca", a substring match that also
-// hits GNOME's screen reader and OrcaSlicer.
+// Hyprland can verify the executable behind an Orca window. The generic Linux
+// window lookup walks the agent's PID chain, which ends at Orca's detached daemon.
 // Resolves — never rejects — with { ok, match, reason }. Callers that only want
 // the side effect can ignore it, but Telegram Direct Send has to wait for it:
 // pressing Ctrl+V before the switch lands types the reply into whichever pane was
@@ -1207,8 +1207,8 @@ function scheduleOrcaPaneFocus(orcaPaneKey, cwd) {
   if (!orcaPaneKey) return Promise.resolve({ ok: false, match: null, reason: "no-pane-key" });
   return new Promise((resolve) => {
     setTimeout(() => {
-      const done = (ok, match, reason) => {
-        logFocusResult(`branch=orca reason=${reason}`);
+      const done = (ok, match, reason, raise) => {
+        logFocusResult(`branch=orca reason=${reason}${raise ? ` raise=${raise}` : ""}`);
         resolve({ ok, match, reason });
       };
       const switchTo = (handle, match, mayReresolve) => {
@@ -1218,11 +1218,15 @@ function scheduleOrcaPaneFocus(orcaPaneKey, cwd) {
             // hit would arrive indistinguishable from a real pane match, which is
             // the one thing the Direct Send gate must be able to tell apart.
             if (match === "exact") orcaHandleCache.set(orcaPaneKey, handle);
-            // Raise last, and only here: Windows raises from inside the generated
-            // script, but macOS has no such step, and raising before the switch
-            // resolves would pull Orca forward showing the wrong tab — or pull it
-            // forward for a pane that turned out not to be ours at all.
+            // Raising before the switch resolves could show the previous tab
+            // or bring Orca forward for a pane that has already closed.
             if (isMac) return raiseOrcaMacWindow(() => done(true, match, "orca-pane-switched"));
+            if (isLinux && isHyprlandSession()) {
+              return raiseOrcaHyprlandWindow({ execFile }).then(
+                (raise) => done(true, match, "orca-pane-switched", raise),
+                () => done(true, match, "orca-pane-switched", "failed:hyprctl"),
+              );
+            }
             return done(true, match, "orca-pane-switched");
           }
           orcaHandleCache.delete(orcaPaneKey);
@@ -2223,7 +2227,8 @@ function focusTerminalWindow(sourcePidOrRequest, cwd, editor, pidChain, meta) {
   // A local source PID is the authority for every traditional terminal path.
   // Orca is the one exception: its pane key names a local IDE pane even when
   // the agent process itself runs through Orca's SSH PTY on another host.
-  const paneOnlyOrcaFocus = !!request.orcaPaneKey && (isMac || isWin);
+  const hyprlandOrcaFocus = isLinux && !!request.orcaPaneKey && isHyprlandSession();
+  const paneOnlyOrcaFocus = !!request.orcaPaneKey && (isMac || isWin || hyprlandOrcaFocus);
   if (!request.sourcePid && !paneOnlyOrcaFocus) {
     logFocusResult("branch=none reason=no-source-pid");
     return normalizeFocusResultPayload({ reason: "no-source-pid" });
@@ -2236,10 +2241,14 @@ function focusTerminalWindow(sourcePidOrRequest, cwd, editor, pidChain, meta) {
   }
 
   if (isLinux) {
-    focusTerminalWindowLegacy(request);
-    scheduleTerminalTabFocus(request.editor, request.pidChain);
-    scheduleTmuxPaneFocus(request.pidChain, request.tmuxSocket, request.tmuxClient);
-    scheduleHerdrPaneFocus(request.herdrPaneId, request.herdrSocket);
+    if (hyprlandOrcaFocus) {
+      scheduleOrcaPaneFocus(request.orcaPaneKey, request.cwd);
+    } else {
+      focusTerminalWindowLegacy(request);
+      scheduleTerminalTabFocus(request.editor, request.pidChain);
+      scheduleTmuxPaneFocus(request.pidChain, request.tmuxSocket, request.tmuxClient);
+      scheduleHerdrPaneFocus(request.herdrPaneId, request.herdrSocket);
+    }
     logFocusResult("branch=linux-command-submitted");
     return normalizeFocusResultPayload({ reason: "linux-command-submitted" });
   }
