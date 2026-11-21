@@ -6402,6 +6402,7 @@ if (!gotTheLock) {
       displayName: app.commandLine.getSwitchValue("display"),
       onError: (err) => console.warn("Clawd: linux-x11-cursor failed:", err && err.message),
     });
+    require("./hyprland-cursor").installHyprlandCursor(screen, { app });
 
     // Older macOS and development builds retain the padded runtime icon from
     // #416. Packaged Tahoe+ leaves the Dock untouched so macOS can apply the
